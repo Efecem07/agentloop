@@ -57,3 +57,20 @@ async def test_markdown_report_renders():
     md = markdown_report(report)
     assert "| good | ✅ pass |" in md
     assert "1/1 passed" in md
+
+
+async def test_markdown_report_escapes_table_breaking_characters():
+    """Graders write failure reasons in prose; a pipe from a regex or a newline from a
+    multi-line assertion used to split the row and mangle the whole table."""
+    async def run_it():
+        return {"final_score": 10}
+
+    def pipey_grade(_res: dict) -> list[str]:
+        return ["pattern /a|b/ did not match", "line one\nline two"]
+
+    report = await run_evals([Scenario("pipes", run_it, pipey_grade)])
+    md = markdown_report(report)
+    body = [ln for ln in md.splitlines() if ln.startswith("| pipes")]
+    assert len(body) == 1                              # one row, not split across lines
+    assert "/a\\|b/" in body[0]                        # the reason's pipe is escaped
+    assert len(body[0].split(" | ")) == 4              # still exactly four columns

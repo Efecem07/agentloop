@@ -26,7 +26,10 @@ every run fully inspectable:
   runs can be inspected, replayed and graded.
 - **Provider fallback chain**: point it at any OpenAI-compatible endpoint; give it
   two and it fails over automatically (free-tier queues jam, budgets fill — one
-  provider being down never takes the feature down).
+  provider being down never takes the feature down). Each provider normally brings
+  its own model id, since the same model rarely lives under the same name on two
+  endpoints. `Agent(model=...)` overrides that on every attempt, for when a
+  particular agent must run on a particular model.
 
 ## Evals as a first-class citizen
 

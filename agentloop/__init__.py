@@ -11,7 +11,7 @@ from .core import (
 )
 from .evals import Report, Scenario, ScenarioResult, markdown_report, print_report, run, run_evals
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "Agent",

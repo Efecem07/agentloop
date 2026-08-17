@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentloop"
-version = "0.1.0"
+version = "0.1.1"
 description = "A minimal, transparent LLM agent framework with a built-in eval harness. No magic, one screen of loop logic."
 readme = "README.md"
 license = { text = "MIT" }

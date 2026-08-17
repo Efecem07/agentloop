@@ -80,6 +80,19 @@ class Tool:
     parameters: dict  # JSON Schema for the arguments object
     fn: Callable[..., Awaitable[Any]]
 
+    def __post_init__(self) -> None:
+        # `state` is passed as a keyword by the harness, so a schema property of the
+        # same name would collide and every call to this tool would fail as a
+        # TypeError swallowed into an error observation — silent and hard to trace.
+        # Fail loudly at construction instead.
+        props = (self.parameters or {}).get("properties") or {}
+        if "state" in props:
+            raise ValueError(
+                f"Tool {self.name!r}: 'state' is a reserved argument name. Tools are "
+                f"invoked as fn(state=<shared dict>, **model_args); rename the schema "
+                f"property."
+            )
+
     def schema(self) -> dict:
         return {
             "type": "function",
@@ -148,6 +161,10 @@ class Agent:
         self.system = system
         self.tools = {t.name: t for t in tools}
         self.model = model or DEFAULT_MODEL
+        # An explicit model is an instruction, not a hint: it overrides the per-provider
+        # model on every attempt in the chain. Without the flag we could not tell
+        # "caller asked for gpt-4o" apart from "nobody asked, we defaulted".
+        self._model_override = model
         self.max_steps = max_steps  # FAILURE MODE guard: hard cap on the loop
         self.temperature = temperature
         self._llm = llm
@@ -234,7 +251,7 @@ class Agent:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        return await _request(kwargs)
+        return await _request(kwargs, model_override=self._model_override)
 
 
 # ── Provider fallback chain ─────────────────────────────────────────────────────
@@ -316,12 +333,19 @@ async def _attempt(client: AsyncOpenAI, kwargs: dict):
     raise last_err  # type: ignore[misc]
 
 
-async def _request(kwargs: dict):
-    """Try each provider in order; return the first success. Raises only if ALL fail."""
+async def _request(kwargs: dict, model_override: str | None = None):
+    """Try each provider in order; return the first success. Raises only if ALL fail.
+
+    Each provider normally supplies its own model id, since the same model rarely
+    exists under the same name on two endpoints. `model_override` is the caller
+    saying "I specifically want this model": it is then forced on every attempt, so
+    a provider that does not serve it fails and the chain moves on rather than
+    quietly answering with something else.
+    """
     last_err: Exception | None = None
     for prov in _get_providers():
         k = dict(kwargs)
-        k["model"] = prov.model  # each provider has its own model id
+        k["model"] = model_override or prov.model
         try:
             return await _attempt(prov.client, k)
         except Exception as e:  # noqa: BLE001
@@ -333,12 +357,18 @@ async def _request(kwargs: dict):
 async def chat(
     system: str, user: str, max_tokens: int | None = None,
     json_mode: bool = False, temperature: float = 0.3,
+    model: str | None = None,
 ) -> str:
-    """A plain (non-tool) completion on the same provider chain. Tools use this for
-    their internal sub-LLM calls (analyse / score / rewrite) so the whole agent —
-    loop AND tools — runs on the same configured backend."""
+    """A plain (non-tool) completion on the same provider chain that the agent loop
+    uses, so a tool's internal sub-LLM calls (analyse / score / rewrite) hit the same
+    endpoints, retries and failover as the loop itself.
+
+    Model selection follows the same rule as the loop: the provider's own model,
+    unless `model` names one explicitly. If an agent was built with an explicit
+    model and you want its tools on that same model, pass it here too — the module
+    does not reach into agent state to guess."""
     kwargs: dict = {
-        "model": DEFAULT_MODEL,
+        "model": model or DEFAULT_MODEL,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": temperature,
         "timeout": 45,
@@ -347,31 +377,57 @@ async def chat(
         kwargs["max_tokens"] = max_tokens
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    msg = await _request(kwargs)
+    msg = await _request(kwargs, model_override=model)
     return msg.content or ""
 
 
-async def chat_json(system: str, user: str, max_tokens: int = 1000) -> dict:
+async def chat_json(
+    system: str, user: str, max_tokens: int = 1000, model: str | None = None,
+) -> dict:
     """chat() + tolerant JSON parse — the standard way a tool gets structured output.
     json_mode first, plain fallback for providers that reject response_format, then a
-    forgiving parse that survives stray prose / code fences."""
+    forgiving parse that survives stray prose and code fences. Returns {} if nothing
+    parseable came back."""
     try:
-        raw = await chat(system, user, max_tokens=max_tokens, json_mode=True)
+        raw = await chat(system, user, max_tokens=max_tokens, json_mode=True, model=model)
     except Exception:
-        raw = await chat(system, user, max_tokens=max_tokens)
+        raw = await chat(system, user, max_tokens=max_tokens, model=model)
     s = re.sub(r"^```(?:json)?\s*", "", (raw or "").strip())
     s = re.sub(r"\s*```$", "", s.strip())
     try:
         d = json.loads(s)
     except Exception:
-        m = re.search(r"\{.*\}", s, re.DOTALL)
-        d = None
-        if m:
-            try:
-                d = json.loads(m.group(0))
-            except Exception:
-                d = None
+        d = _salvage_json(s)
     return d if isinstance(d, dict) else {}
+
+
+def _salvage_json(s: str) -> dict | None:
+    """Pull a JSON object out of a reply that carries prose around it.
+
+    Scans for every position where a complete object starts and keeps the LAST one.
+    A greedy `\\{.*\\}` cannot do this: on a reply like
+    `Example: {"score": 0}, my answer: {"score": 85}` it spans both objects and the
+    prose between them, fails to parse, and the caller silently receives {}.
+
+    Last rather than first, because a model that shows an example puts it before its
+    answer, while a model that writes a preamble emits only one object anyway.
+    """
+    decoder = json.JSONDecoder()
+    found: dict | None = None
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] != "{":
+            i += 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(s, i)
+        except ValueError:
+            i += 1
+            continue
+        if isinstance(obj, dict):
+            found = obj
+        i = end  # jump past this object: a nested {...} is not a candidate of its own
+    return found
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────────

@@ -11,7 +11,9 @@ These cover the failure modes the framework promises to handle:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,6 +138,61 @@ async def test_max_steps_forces_final_answer():
     assert res.stopped_reason == "max_steps"
     assert res.output  # never empty
     assert res.tool_calls == 3
+
+
+async def test_explicit_model_is_sent_to_the_provider():
+    """Agent(model=...) is an instruction. Before this was fixed the provider chain
+    overwrote it with the provider's own model and the caller was never told."""
+    import agentloop.core as core
+
+    os.environ["AGENTLOOP_BASE_URL"] = "http://127.0.0.1:9/v1"
+    os.environ["AGENTLOOP_API_KEY"] = "x"
+    os.environ["AGENTLOOP_MODEL"] = "provider-model"
+    core.reset_providers()
+    try:
+        sent: list[str] = []
+
+        class FakeCompletions:
+            async def create(self, **kwargs):
+                sent.append(kwargs["model"])
+                msg = SimpleNamespace(content="ok", tool_calls=None)
+                return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+        for prov in core._get_providers():
+            prov.client.chat.completions = FakeCompletions()
+
+        await core.Agent("t", "sys", [], model="asked-for-this-one").run("go")
+        assert sent == ["asked-for-this-one"]
+
+        sent.clear()
+        await core.Agent("t", "sys", []).run("go")
+        assert sent == ["provider-model"]  # no override -> provider decides
+    finally:
+        for key in ("AGENTLOOP_BASE_URL", "AGENTLOOP_API_KEY", "AGENTLOOP_MODEL"):
+            os.environ.pop(key, None)
+        core.reset_providers()
+
+
+def test_salvage_json_survives_prose_and_takes_the_answer():
+    """A greedy {.*} span returned {} for anything with two objects in it."""
+    from agentloop.core import _salvage_json
+
+    assert _salvage_json('Here is the result: {"score": 85}') == {"score": 85}
+    assert _salvage_json('{"score": 85}\nLet me know.') == {"score": 85}
+    # example first, answer second: the answer must win
+    assert _salvage_json('Example: {"score": 0}, my answer: {"score": 85}') == {"score": 85}
+    assert _salvage_json('{"outer": {"inner": 1}}') == {"outer": {"inner": 1}}
+    assert _salvage_json("no json here at all") is None
+
+
+def test_tool_rejects_reserved_state_argument():
+    """Tools are called as fn(state=..., **model_args), so a schema property named
+    'state' collides and the tool can never run. Fail at construction, not at call."""
+    with pytest.raises(ValueError, match="reserved"):
+        Tool("bad", "clashes", {
+            "type": "object",
+            "properties": {"state": {"type": "string"}},
+        }, add_tool)
 
 
 async def test_state_is_shared_between_tools_and_caller():

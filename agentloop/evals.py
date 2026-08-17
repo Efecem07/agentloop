@@ -112,8 +112,15 @@ def markdown_report(report: Report, title: str = "Evals") -> str:
         stats = ", ".join(f"{k}={v}" for k, v in _row_stats(r).items()) or "-"
         if r.fails:
             stats = "; ".join(r.fails)
-        lines.append(f"| {r.name} | {flag} | {stats} | {r.seconds}s |")
+        lines.append(f"| {_cell(r.name)} | {flag} | {_cell(stats)} | {r.seconds}s |")
     return "\n".join(lines)
+
+
+def _cell(value: Any) -> str:
+    """Make a value safe inside a Markdown table cell. Failure reasons are written by
+    graders and routinely contain the very characters that break a table: a pipe from
+    a regex or a range, a newline from a multi-line assertion."""
+    return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
 def _row_stats(r: ScenarioResult) -> dict:
