@@ -1,5 +1,7 @@
 # agentloop
 
+[![tests](https://github.com/Efecem07/agentloop/actions/workflows/tests.yml/badge.svg)](https://github.com/Efecem07/agentloop/actions/workflows/tests.yml) ![python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+
 A minimal, transparent LLM agent framework with a built-in eval harness. No magic:
 the entire agent loop is one readable file, and "does the agent actually work?" is
 answered by scenario-based evals instead of vibes.
